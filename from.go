@@ -1,0 +1,153 @@
+package dec128
+
+import (
+	"math"
+	"strconv"
+
+	"github.com/worldlycuisin/dec128/state"
+	"github.com/worldlycuisin/dec128/uint128"
+)
+
+// FromString creates a new Dec128 from a string.
+// The string must be in the format of [+-][0-9]+(.[0-9]+)?
+// In case of empty string, it returns Zero.
+// In case of errors, it returns NaN with the corresponding error.
+func FromString[S string | []byte](s S) Dec128 {
+	sz := len(s)
+
+	switch sz {
+	case 0:
+		return Zero
+	case 1:
+		switch s[0] {
+		case '0':
+			return Zero
+		case '+', '-', '.':
+			return Dec128{state: state.InvalidFormat}
+		}
+	case 2:
+		if (s[0] == '+' || s[0] == '-') && s[1] == '.' {
+			return Dec128{state: state.InvalidFormat}
+		}
+	}
+
+	var i, prec int
+	var st state.State
+
+	switch s[0] {
+	case '+':
+		i++
+	case '-':
+		st = state.Neg
+		i++
+	}
+
+	if sz <= uint128.MaxSafeStrLen64 {
+		// safe to parse with uint64 as coef
+		var u uint64
+		for ; i < sz; i++ {
+			if s[i] == '.' {
+				if prec != 0 {
+					return Dec128{state: state.InvalidFormat}
+				}
+				prec = sz - i - 1
+				continue
+			}
+			if s[i] < '0' || s[i] > '9' {
+				return Dec128{state: state.InvalidFormat}
+			}
+			u = u*10 + uint64(s[i]-'0')
+		}
+		if u == 0 && prec == 0 {
+			return Zero
+		}
+		return Dec128{coef: uint128.FromUint64(u), exp: uint8(prec), state: st}
+	}
+
+	j := 0
+	for ; j < sz; j++ {
+		if s[j] == '.' {
+			break
+		}
+	}
+
+	if j == sz {
+		coef, e := uint128.FromString(s[i:])
+		if e >= state.Error {
+			return Dec128{state: e}
+		}
+		return Dec128{coef: coef, exp: 0, state: st}
+	}
+
+	if j == sz-1 {
+		return Dec128{state: state.InvalidFormat}
+	}
+
+	prec = sz - j - 1
+	if prec > uint128.MaxSafeStrLen64 {
+		return Dec128{state: state.PrecisionOutOfRange}
+	}
+
+	ipart, ei := uint128.FromString(s[i:j])
+	if ei >= state.Error {
+		return Dec128{state: ei}
+	}
+
+	fpart, ef := uint128.FromString(s[j+1:])
+	if ef >= state.Error {
+		return Dec128{state: ef}
+	}
+
+	// max prec is 19, so the fpart.Hi is always 0 and prec is always <= len(pow10)
+	coef, e := ipart.Mul64(Pow10Uint64[prec])
+	if e >= state.Error {
+		return Dec128{state: e}
+	}
+
+	coef, e = coef.Add64(fpart.Lo)
+	if e >= state.Error {
+		return Dec128{state: e}
+	}
+
+	if coef.IsZero() && prec == 0 {
+		return Zero
+	}
+
+	return Dec128{coef: coef, exp: uint8(prec), state: st}
+}
+
+// DecodeFromUint128 decodes a Dec128 from a Uint128 and an exponent.
+func DecodeFromUint128(coef uint128.Uint128, exp uint8) Dec128 {
+	return Dec128{coef: coef, exp: exp}
+}
+
+// DecodeFromUint64 decodes a Dec128 from a uint64 and an exponent.
+func DecodeFromUint64(coef uint64, exp uint8) Dec128 {
+	return Dec128{coef: uint128.FromUint64(coef), exp: exp}
+}
+
+// DecodeFromInt64 decodes a Dec128 from a int64 and an exponent.
+func DecodeFromInt64(coef int64, exp uint8) Dec128 {
+	if coef == -9223372036854775808 {
+		return Dec128{coef: uint128.FromUint64(9223372036854775808), exp: exp, state: state.Neg}
+	}
+
+	if coef < 0 {
+		return Dec128{coef: uint128.FromUint64(uint64(-coef)), exp: exp, state: state.Neg}
+	}
+
+	return Dec128{coef: uint128.FromUint64(uint64(coef)), exp: exp}
+}
+
+// FromInt64 creates a new Dec128 from an int64.
+func FromInt64(i int64) Dec128 {
+	return DecodeFromInt64(i, 0)
+}
+
+// FromFloat64 returns a decimal from float64.
+func FromFloat64(f float64) Dec128 {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return Dec128{state: state.NaN}
+	}
+	return FromString(strconv.FormatFloat(f, 'f', -1, 64))
+}
